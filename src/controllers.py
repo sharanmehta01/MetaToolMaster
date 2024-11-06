@@ -31,6 +31,11 @@ class GeneralController:
         self.store_task_knowledge(query, final_response, responses)
         return final_response
 
+    def register_plugin(self, plugin_name, plugin_instance):
+        """Registers a new external plug-in sub-controller"""
+        self.plugins[plugin_name] = plugin_instance
+        print(f"Plug-in {plugin_name} has been registered successfully.")
+
     def decompose_query(self, query):
         # Example LLM call to break down query into subtasks
         prompt = f"Decompose this query into subtasks: {query}"
@@ -83,6 +88,16 @@ class GeneralController:
             temperature=0.7
         )
         return response.choices[0].text.strip()
+
+class ExternalPluginSubController:
+    """Example external plug-in sub-controller"""
+    def __init__(self, plugin_name, capabilities):
+        self.plugin_name = plugin_name
+        self.capabilities = capabilities
+
+    def handle_task(self, task):
+        # Placeholder logic for handling tasks
+        return f"{self.plugin_name} handled: {task}
 
 class SubController:
     def __init__(self, role, llm_api_key):
