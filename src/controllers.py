@@ -122,12 +122,12 @@ class ExternalPluginSubController:
 
     def handle_task(self, task):
         # Placeholder logic for handling tasks
-        return f"{self.plugin_name} handled: {task}
+        return f"{self.plugin_name} handled: {task}"
 
 class SubController:
     def __init__(self, role, llm_api_key):
         self.role = role
-        openai.api_key = llm_api_key
+        self.llm_api_key = llm_api_key
 
     def handle_task(self, task):
         # Basic task handling (override in subclasses)
@@ -135,10 +135,20 @@ class SubController:
 
 class DynamicSubController(SubController):
     def __init__(self, role, instructions):
-        super().__init__(role, openai.api_key)
+        super().__init__(role, None)  # Removed direct use of openai.api_key
         self.instructions = instructions
 
     def handle_task(self, task):
         # Use provided instructions to handle task
         prompt = f"Using instructions '{self.instructions}' for task: {task}"
         return self.llm_query(prompt)
+
+    def llm_query(self, prompt):
+        # Make LLM API call using LLaMA
+        response = llama_cpp.Completion.create(
+            model="llama-7b",
+            prompt=prompt,
+            max_tokens=150,
+            temperature=0.7
+        )
+        return response.choices[0].text.strip()
