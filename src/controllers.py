@@ -1,15 +1,16 @@
-import openai  # Assumes we'll be using OpenAI API; replace or adjust based on our LLM
+import llama_cpp  # Assuming we are using a LLaMA API wrapper for LLM queries
 
 class GeneralController:
     def __init__(self, sub_controllers, gsc, llm_api_key, max_feedback_loops=3):
         self.sub_controllers = sub_controllers  # Dictionary of Sub-Controller instances
         self.gsc = gsc  # General Sub-Controller for handling common tasks
-        openai.api_key = llm_api_key
+        self.llm_api_key = llm_api_key
         self.max_feedback_loops = max_feedback_loops
         self.task_knowledge_base = {}
+        self.plugins = {}  # Storage for dynamically registered plug-ins
 
     def process_query(self, query):
-        # Decompose the query into subtasks
+        # Decompose the query into subtasks with dynamic role assignment
         tasks = self.decompose_query(query)
         responses = {}
 
@@ -37,10 +38,25 @@ class GeneralController:
         print(f"Plug-in {plugin_name} has been registered successfully.")
 
     def decompose_query(self, query):
-        # Example LLM call to break down query into subtasks
-        prompt = f"Decompose this query into subtasks: {query}"
+        # Use LLM to break down the query into manageable subtasks and assign appropriate roles
+        prompt = f"Decompose this query into subtasks and assign roles: {query}\nAvailable roles: {list(self.sub_controllers.keys())}. If no role seems a perfect match, use your best judgment to assign a role that may be a partial match. If no role seems to be a partial match, then suggest exaclty one new role/domain name that doesn't already exist in the list for that subtask."
         response = self.llm_query(prompt)
-        return {"analysis": "Analyze this data", "new_task": "Unrecognized task"}
+
+        # Example response parsing logic (assuming LLM response is formatted correctly)
+        # Expected response format: role: task (newline-separated for multiple tasks)
+        tasks = {}
+        for line in response.splitlines():
+            role, task = line.split(': ', 1)
+            if role not in self.sub_controllers:
+                # If role does not exist, ask LLM to verify if a new role is needed
+                role_verification_prompt = f"Is '{role}' a valid role for this task: {task}? If not, suggest a new role."
+                new_role = self.llm_query(role_verification_prompt)
+                if new_role.lower() != role.lower():
+                    # Assign new role and proceed to create a new SC
+                    role = new_role
+            tasks[role] = task
+
+        return tasks
 
     def execute_with_feedback(self, sc, task):
         # Handle feedback loop for refining SC output
@@ -71,6 +87,14 @@ class GeneralController:
         self.sub_controllers[role] = new_sc
         return new_sc.handle_task(task)
 
+    def create_new_tool(self, sc, task):
+        # Create a new tool for an existing SC if it lacks the ability to execute the task
+        prompt = f"The sub-controller '{sc.role}' needs a new tool to handle this task: {task}. Please specify the tool requirements."
+        tool_instructions = self.llm_query(prompt)
+        # Assuming the SC has a method to integrate new tools dynamically
+        sc.add_tool(tool_instructions)
+        return sc.handle_task(task)
+
     def store_task_knowledge(self, query, final_response, responses):
         # Store task handling details for future reference
         self.task_knowledge_base[query] = {"final_response": final_response, "subtask_responses": responses}
@@ -80,14 +104,15 @@ class GeneralController:
         return " | ".join(f"{role}: {response}" for role, response in responses.items())
 
     def llm_query(self, prompt):
-        # Make LLM API call
-        response = openai.Completion.create(
-            model="gpt-4",  # Adjust model if needed
+        # Make LLM API call using LLaMA
+        response = llama_cpp.Completion.create(
+            model="llama-7b",  # Adjust model if needed
             prompt=prompt,
             max_tokens=150,
             temperature=0.7
         )
         return response.choices[0].text.strip()
+
 
 class ExternalPluginSubController:
     """Example external plug-in sub-controller"""
