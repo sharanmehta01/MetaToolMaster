@@ -1,9 +1,16 @@
 import llama_cpp  # Assuming we are using a LLaMA API wrapper for LLM queries
 
+TOOLBENCH_CATEGORIES = [
+    "Healthcare", "Finance", "E-commerce", "Education", "Social Media",
+    "Weather", "Travel", "Food & Drink", "Sports", "Entertainment",
+    # Add the rest of the 49 categories...
+]
+
 class GeneralController:
-    def __init__(self, sub_controllers, gsc, llm_api_key, max_feedback_loops=3):
-        self.sub_controllers = sub_controllers  # Dictionary of Sub-Controller instances
-        self.gsc = gsc  # General Sub-Controller for handling common tasks
+    def __init__(self, llm_api_key, max_feedback_loops=3):
+        # Create domain-specific sub-controllers for each category in ToolBench
+        self.sub_controllers = {category: SubController(category, llm_api_key) for category in TOOLBENCH_CATEGORIES}
+        self.gsc = GeneralSubController(llm_api_key)  # General Sub-Controller for handling common tasks
         self.llm_api_key = llm_api_key
         self.max_feedback_loops = max_feedback_loops
         self.task_knowledge_base = {}
@@ -23,7 +30,10 @@ class GeneralController:
                 gsc_response = self.gsc.handle_task(task)
                 if not self.verify_result(gsc_response):
                     # If GSC cannot handle the task effectively, create a new SC
-                    responses[role] = self.create_new_sc(role, task)
+                    new_sc_response = self.create_new_sc(role, task)
+                    if self.verify_result(new_sc_response):
+                        self.persist_new_sc(role, new_sc_response)
+                    responses[role] = new_sc_response
                 else:
                     responses[role] = gsc_response
 
@@ -39,7 +49,7 @@ class GeneralController:
 
     def decompose_query(self, query):
         # Use LLM to break down the query into manageable subtasks and assign appropriate roles
-        prompt = f"Decompose this query into subtasks and assign roles: {query}\nAvailable roles: {list(self.sub_controllers.keys())}. If no role seems a perfect match, use your best judgment to assign a role that may be a partial match. If no role seems to be a partial match, then suggest exaclty one new role/domain name that doesn't already exist in the list for that subtask."
+        prompt = f"Decompose this query into subtasks and assign roles: {query}\nAvailable roles: {list(self.sub_controllers.keys())}. If no role seems a perfect match, use your best judgment to assign a role that may be a partial match. If no role seems to be a partial match, then suggest exactly one new role/domain name that doesn't already exist in the list for that subtask."
         response = self.llm_query(prompt)
 
         # Example response parsing logic (assuming LLM response is formatted correctly)
@@ -93,7 +103,11 @@ class GeneralController:
         tool_instructions = self.llm_query(prompt)
         # Assuming the SC has a method to integrate new tools dynamically
         sc.add_tool(tool_instructions)
-        return sc.handle_task(task)
+        tool_result = sc.handle_task(task)
+        # Persist the new tool if the result is successful
+        if self.verify_result(tool_result):
+            self.persist_new_tool(sc.role, tool_instructions)
+        return tool_result
 
     def store_task_knowledge(self, query, final_response, responses):
         # Store task handling details for future reference
@@ -113,6 +127,20 @@ class GeneralController:
         )
         return response.choices[0].text.strip()
 
+    def persist_new_sc(self, role, sc_instructions):
+        # Persist the new sub-controller for future reference
+        self.task_knowledge_base[f"new_sc_{role}"] = {"instructions": sc_instructions}
+
+    def persist_new_tool(self, role, tool_instructions):
+        # Persist the new tool for future reference
+        self.task_knowledge_base[f"new_tool_{role}"] = {"tool_instructions": tool_instructions}
+
+class GeneralSubController(SubController):
+    """General Sub-Controller for handling tasks common across multiple domains"""
+    def handle_task(self, task):
+        # Placeholder for general task handling logic
+        prompt = f"Perform a general task: {task}"
+        return self.llm_query(prompt)
 
 class ExternalPluginSubController:
     """Example external plug-in sub-controller"""
@@ -135,7 +163,7 @@ class SubController:
 
 class DynamicSubController(SubController):
     def __init__(self, role, instructions):
-        super().__init__(role, None)  # Removed direct use of openai.api_key
+        super().__init__(role, None)
         self.instructions = instructions
 
     def handle_task(self, task):
