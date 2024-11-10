@@ -90,8 +90,12 @@ class GeneralController:
         return self.llm_query(prompt)
 
     def create_new_sc(self, role, task):
-        # Create a new sub-controller dynamically for a new role
-        prompt = f"Create a new sub-controller for role '{role}' to handle this task: {task}"
+        # Create a new sub-controller dynamically for a new role with comprehensive instructions
+        prompt = (
+            f"Create a new sub-controller for role '{role}' to handle this task: {task}. "
+            f"Include details about the domain, specific task requirements, and any tools or APIs that might be relevant "
+            f"for the effective execution of this task."
+        )
         sc_instructions = self.llm_query(prompt)
         new_sc = DynamicSubController(role, sc_instructions)
         self.sub_controllers[role] = new_sc
@@ -99,7 +103,11 @@ class GeneralController:
 
     def create_new_tool(self, sc, task):
         # Create a new tool for an existing SC if it lacks the ability to execute the task
-        prompt = f"The sub-controller '{sc.role}' needs a new tool to handle this task: {task}. Please specify the tool requirements."
+        prompt = (
+            f"The sub-controller '{sc.role}' needs a new tool to handle this task: {task}. "
+            f"Please specify the tool requirements, including the expected input, output, and capabilities needed to "
+            f"effectively solve the task."
+        )
         tool_instructions = self.llm_query(prompt)
         # Assuming the SC has a method to integrate new tools dynamically
         sc.add_tool(tool_instructions)
