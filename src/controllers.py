@@ -1,20 +1,36 @@
-import llama_cpp  # Assuming we are using a LLaMA API wrapper for LLM queries
+import xlam_cpp  # Salesforce/xLAM-1b-fc-r API wrapper for LLM queries
 
-TOOLBENCH_CATEGORIES = [
-    "Healthcare", "Finance", "E-commerce", "Education", "Social Media",
-    "Weather", "Travel", "Food & Drink", "Sports", "Entertainment",
-    # Add the rest of the 49 categories...
-]
+# External Registries (Global)
+tools_registry = {
+    # Example format
+    "WeatherAPI": ["Weather", "Provides weather forecasts and current weather data", "weather_api_call()"],
+    # Add other tools similarly...
+}
 
+sub_controllers_registry = {
+    # Example format
+    "Weather": "Handles weather-related tasks using WeatherAPI to provide weather information.",
+    # Add other sub-controller domains similarly...
+}
+
+metadata_registry = {
+    # Metadata for tools, sub-controllers, and domains.
+    "WeatherAPI": {"domain": "Weather", "capabilities": ["forecast", "current weather"], "version": "1.0"},
+    # Add metadata for other tools and SCs...
+}
+
+# GeneralController Class
 class GeneralController:
-    def __init__(self, llm_api_key, max_feedback_loops=3):
-        # Create domain-specific sub-controllers for each category in ToolBench
-        self.sub_controllers = {category: SubController(category, llm_api_key) for category in TOOLBENCH_CATEGORIES}
-        self.gsc = GeneralSubController(llm_api_key)  # General Sub-Controller for handling common tasks
+    def __init__(self, sub_controllers, gsc, llm_api_key, max_feedback_loops=3):
+        self.sub_controllers = sub_controllers  # Dictionary of Sub-Controller instances
+        self.gsc = gsc  # General Sub-Controller for handling common tasks
         self.llm_api_key = llm_api_key
         self.max_feedback_loops = max_feedback_loops
-        self.task_knowledge_base = {}
         self.plugins = {}  # Storage for dynamically registered plug-ins
+
+        # Copy of permanent registries for temporary use during task lifecycle
+        self.task_sub_controllers = sub_controllers_registry.copy()
+        self.task_tools = tools_registry.copy()
 
     def process_query(self, query):
         # Decompose the query into subtasks with dynamic role assignment
@@ -27,19 +43,16 @@ class GeneralController:
                 responses[role] = self.execute_with_feedback(self.sub_controllers[role], task)
             else:
                 # Attempt to handle with the General Sub-Controller (GSC) first
-                gsc_response = self.gsc.handle_task(task)
+                gsc_response = self.execute_with_feedback(self.gsc, task)
                 if not self.verify_result(gsc_response):
                     # If GSC cannot handle the task effectively, create a new SC
-                    new_sc_response = self.create_new_sc(role, task)
-                    if self.verify_result(new_sc_response):
-                        self.persist_new_sc(role, new_sc_response)
-                    responses[role] = new_sc_response
+                    responses[role] = self.create_new_sc(role, task)
                 else:
                     responses[role] = gsc_response
 
         # Aggregate responses from all subtasks and return the final result
         final_response = self.aggregate_responses(responses)
-        self.store_task_knowledge(query, final_response, responses)
+        self.store_persistent_data(query, final_response, responses)
         return final_response
 
     def register_plugin(self, plugin_name, plugin_instance):
@@ -48,143 +61,122 @@ class GeneralController:
         print(f"Plug-in {plugin_name} has been registered successfully.")
 
     def decompose_query(self, query):
-        # Use LLM to break down the query into manageable subtasks and assign appropriate roles
-        prompt = f"Decompose this query into subtasks and assign roles: {query}\nAvailable roles: {list(self.sub_controllers.keys())}. If no role seems a perfect match, use your best judgment to assign a role that may be a partial match. If no role seems to be a partial match, then suggest exactly one new role/domain name that doesn't already exist in the list for that subtask."
+        # Use LLM to break down the query into subtasks and assign appropriate roles
+        prompt = (
+            f"Decompose the following query into subtasks and assign roles.\nQuery: {query}\n"
+            f"Available domains and capabilities: {self.task_sub_controllers}\n"
+            "For each subtask, provide a score (0-10) to rank which domain is best suited. "
+            "If no domain seems appropriate, create a new domain."
+        )
         response = self.llm_query(prompt)
 
-        # Example response parsing logic (assuming LLM response is formatted correctly)
-        # Expected response format: role: task (newline-separated for multiple tasks)
         tasks = {}
         for line in response.splitlines():
-            role, task = line.split(': ', 1)
-            if role not in self.sub_controllers:
-                # If role does not exist, ask LLM to verify if a new role is needed
-                role_verification_prompt = f"Is '{role}' a valid role for this task: {task}? If not, suggest a new role."
-                new_role = self.llm_query(role_verification_prompt)
-                if new_role.lower() != role.lower():
-                    # Assign new role and proceed to create a new SC
-                    role = new_role
-            tasks[role] = task
+            role, score, task = line.split(': ', 2)
+            score = int(score)
+            if score >= 8:  # Threshold for matching an SC
+                tasks[role] = task
+            else:
+                tasks["general"] = task  # Assign to GSC if no match is found
 
         return tasks
 
     def execute_with_feedback(self, sc, task):
-        # Handle feedback loop for refining SC output
+        feedback_list = []  # List to hold feedback history
         for _ in range(self.max_feedback_loops):
-            result = sc.handle_task(task)
+            result = sc.handle_task(task, feedback=feedback_list)
             if self.verify_result(result):
                 return result
-            # Add feedback to modify task
-            task += f" | Feedback: {self.generate_feedback(result)}"
+            # Generate feedback and append to the feedback list
+            feedback = self.generate_feedback(task, result)
+            feedback_list.append(feedback)
+
+            if "converged" in feedback.lower():
+                break
+
         return result
 
     def verify_result(self, result):
         # Verify quality of result using LLM
-        prompt = f"Verify the quality of this result: {result}"
+        prompt = f"Verify if this result meets the requirements: {result}\nProvide a 'pass' or 'fail' response."
         verification_response = self.llm_query(prompt)
         return "pass" in verification_response.lower()
 
-    def generate_feedback(self, result):
+    def generate_feedback(self, task, result):
         # Generate feedback for improving the result
-        prompt = f"Provide feedback for improving: {result}"
+        prompt = f"Provide detailed feedback on how to improve the following result.\nTask: {task}\nResult: {result}"
         return self.llm_query(prompt)
 
     def create_new_sc(self, role, task):
-        # Create a new sub-controller dynamically for a new role with comprehensive instructions
+        # Create a new sub-controller dynamically for a new role
         prompt = (
-            f"Create a new sub-controller for role '{role}' to handle this task: {task}. "
-            f"Include details about the domain, specific task requirements, and any tools or APIs that might be relevant "
-            f"for the effective execution of this task."
+            f"Create a new sub-controller for domain '{role}' to handle this task.\n"
+            f"Take reference from existing sub-controllers to provide comprehensive instructions."
         )
         sc_instructions = self.llm_query(prompt)
         new_sc = DynamicSubController(role, sc_instructions)
-        self.sub_controllers[role] = new_sc
+        self.task_sub_controllers[role] = f"Handles domain '{role}' tasks as per given instructions."
         return new_sc.handle_task(task)
 
-    def create_new_tool(self, sc, task):
-        # Create a new tool for an existing SC if it lacks the ability to execute the task
-        prompt = (
-            f"The sub-controller '{sc.role}' needs a new tool to handle this task: {task}. "
-            f"Please specify the tool requirements, including the expected input, output, and capabilities needed to "
-            f"effectively solve the task."
-        )
-        tool_instructions = self.llm_query(prompt)
-        # Assuming the SC has a method to integrate new tools dynamically
-        sc.add_tool(tool_instructions)
-        tool_result = sc.handle_task(task)
-        # Persist the new tool if the result is successful
-        if self.verify_result(tool_result):
-            self.persist_new_tool(sc.role, tool_instructions)
-        return tool_result
-
-    def store_task_knowledge(self, query, final_response, responses):
-        # Store task handling details for future reference
-        self.task_knowledge_base[query] = {"final_response": final_response, "subtask_responses": responses}
+    def store_persistent_data(self, query, final_response, responses):
+        # Store successful SCs or tools into permanent registries
+        for role, response in responses.items():
+            if "success" in response.lower():
+                if role not in sub_controllers_registry:
+                    sub_controllers_registry[role] = self.task_sub_controllers[role]
 
     def aggregate_responses(self, responses):
-        # Combine results from all subtasks
-        return " | ".join(f"{role}: {response}" for role, response in responses.items())
+        # Aggregate results meaningfully
+        prompt = (
+            "Combine the following subtasks' results into a meaningful response to answer the original query.\n"
+            f"Subtask results: {responses}\nProvide a combined response."
+        )
+        return self.llm_query(prompt)
 
     def llm_query(self, prompt):
-        # Make LLM API call using LLaMA
-        response = llama_cpp.Completion.create(
-            model="llama-7b",  # Adjust model if needed
+        # Make LLM API call using Salesforce/xLAM-1b-fc-r
+        response = xlam_cpp.Completion.create(
+            model="xlam-1b-fc-r",  # Adjust model if needed
             prompt=prompt,
             max_tokens=150,
             temperature=0.7
         )
         return response.choices[0].text.strip()
 
-    def persist_new_sc(self, role, sc_instructions):
-        # Persist the new sub-controller for future reference
-        self.task_knowledge_base[f"new_sc_{role}"] = {"instructions": sc_instructions}
-
-    def persist_new_tool(self, role, tool_instructions):
-        # Persist the new tool for future reference
-        self.task_knowledge_base[f"new_tool_{role}"] = {"tool_instructions": tool_instructions}
-
-class GeneralSubController(SubController):
-    """General Sub-Controller for handling tasks common across multiple domains"""
-    def handle_task(self, task):
-        # Placeholder for general task handling logic
-        prompt = f"Perform a general task: {task}"
-        return self.llm_query(prompt)
-
-class ExternalPluginSubController:
-    """Example external plug-in sub-controller"""
-    def __init__(self, plugin_name, capabilities):
-        self.plugin_name = plugin_name
+# SubController Class
+class SubController:
+    def __init__(self, role, tools, capabilities):
+        self.role = role
+        self.tools = tools
         self.capabilities = capabilities
 
-    def handle_task(self, task):
-        # Placeholder logic for handling tasks
-        return f"{self.plugin_name} handled: {task}"
-
-class SubController:
-    def __init__(self, role, llm_api_key):
-        self.role = role
-        self.llm_api_key = llm_api_key
-
-    def handle_task(self, task):
-        # Basic task handling (override in subclasses)
-        return f"{self.role} handled: {task}"
-
-class DynamicSubController(SubController):
-    def __init__(self, role, instructions):
-        super().__init__(role, None)
-        self.instructions = instructions
-
-    def handle_task(self, task):
-        # Use provided instructions to handle task
-        prompt = f"Using instructions '{self.instructions}' for task: {task}"
-        return self.llm_query(prompt)
-
-    def llm_query(self, prompt):
-        # Make LLM API call using LLaMA
-        response = llama_cpp.Completion.create(
-            model="llama-7b",
-            prompt=prompt,
-            max_tokens=150,
-            temperature=0.7
+    def handle_task(self, task, feedback=[]):
+        prompt = (
+            f"As a domain expert in '{self.role}', you have the following tools: {self.tools}.\n"
+            f"Capabilities: {self.capabilities}\nTask: {task}\n"
+            f"Feedback: {' | '.join(feedback)}\nProvide an expert response."
         )
-        return response.choices[0].text.strip()
+        return xlam_cpp.Completion.create(
+            model="xlam-1b-fc-r",
+            prompt=prompt,
+            max_tokens=200,
+            temperature=0.7
+        ).choices[0].text.strip()
+
+# GeneralSubController Class
+class GeneralSubController(SubController):
+    def __init__(self, role="general", tools=None):
+        capabilities = "Handles generic tasks that do not fall under any specialized domain."
+        super().__init__(role, tools, capabilities)
+
+    def handle_task(self, task, feedback=[]):
+        prompt = (
+            f"As the general-purpose controller, you are handling the following task: {task}.\n"
+            f"Feedback history: {' | '.join(feedback)}\nProvide a response."
+        )
+        return xlam_cpp.Completion.create(
+            model="xlam-1b-fc-r",
+            prompt=prompt,
+            max_tokens=200,
+            temperature=0.7
+        ).choices[0].text.strip()
